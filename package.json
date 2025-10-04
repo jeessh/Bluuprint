@@ -1,5 +1,23 @@
 {
-  "devDependencies": {
-    "wrangler": "^4.42.0"
+  "name": "bluuprint-discord-bot",
+  "version": "1.0.0",
+  "description": "A Discord bot with slash commands",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js",
+    "deploy-commands": "node src/deploy-commands.js",
+    "deploy-commands-prod": "NODE_ENV=production node src/deploy-commands.js",
+    "deploy-function": "supabase functions deploy discord-bot --no-verify-jwt",
+    "logs": "supabase functions logs discord-bot",
+    "status": "supabase status"
+  },
+  "keywords": ["discord", "bot", "slash-commands"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1"
   }
 }
