@@ -1,6 +1,6 @@
 import { Client, Events, GatewayIntentBits, Collection } from 'discord.js';
 import dotenv from 'dotenv';
-import { HELLO, CREATE_ACTION_ITEMS } from './commands.js';
+import { CREATE_ACTION_ITEMS } from './commands.js';
 
 dotenv.config();
 
@@ -11,7 +11,6 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 client.commands = new Collection();
 
 // Add commands to the collection
-client.commands.set(HELLO.name, HELLO);
 client.commands.set(CREATE_ACTION_ITEMS.name, CREATE_ACTION_ITEMS);
 
 // When the client is ready, run this code (only once)
@@ -25,10 +24,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     const { commandName } = interaction;
 
-    if (commandName === 'hello') {
-        const message = interaction.options.getString('message') || 'Hello!';
-        await interaction.reply(`Hello! You said: ${message}`);
-    } else if (commandName === 'create_action_items') {
+    if (commandName === 'create_action_items') {
         await interaction.reply('Creating action items for the meeting...');
     }
 });

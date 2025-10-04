@@ -57,22 +57,6 @@ async function home(request: Request) {
   if (type === DiscordCommandType.ApplicationCommand) {
     const { name } = data
     
-    if (name === 'hello') {
-      const messageOption = data.options?.find(
-        (option: { name: string; value: string }) => option.name === 'message'
-      )
-      const message = messageOption?.value || 'Hello!'
-      
-      return new Response(JSON.stringify({
-        type: 4,
-        data: {
-          content: `Hello! You said: ${message}`,
-        },
-      }), {
-        headers: { 'Content-Type': 'application/json' }
-      })
-    }
-    
     if (name === 'create_action_items') {
       return new Response(JSON.stringify({
         type: 4,

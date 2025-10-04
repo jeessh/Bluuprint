@@ -1,11 +1,10 @@
 import { REST, Routes } from 'discord.js';
 import dotenv from 'dotenv';
-import { HELLO, CREATE_ACTION_ITEMS } from './commands.js';
+import { CREATE_ACTION_ITEMS } from './commands.js';
 
 dotenv.config();
 
 const commands = [
-    HELLO,
     CREATE_ACTION_ITEMS
 ];
 
