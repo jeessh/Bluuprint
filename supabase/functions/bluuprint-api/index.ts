@@ -3,9 +3,6 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 // @ts-ignore
 import nacl from 'https://cdn.skypack.dev/tweetnacl@v1.0.3?dts'
 
-// Simple in-memory store (use database in production)
-const userActionItems = new Map()
-
 serve(async (req: Request) => {
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 })
@@ -23,8 +20,9 @@ serve(async (req: Request) => {
     return jsonResponse({ error: 'Invalid signature' }, 401)
   }
 
-  const { type = 0, data = {} } = JSON.parse(body)
-  
+  const interaction = JSON.parse(body)
+  const { type = 0, data = {} } = interaction
+
   if (type === 1) {
     return jsonResponse({ type: 1 })
   }
@@ -34,11 +32,11 @@ serve(async (req: Request) => {
   }
 
   if (type === 3) {
-    return handleButtonClick(data)
+    return handleButtonClick(interaction)
   }
 
   if (type === 5) {
-    return handleModalSubmit(data)
+    return handleModalSubmit(interaction)
   }
 
   return jsonResponse({ error: 'Unknown interaction' }, 400)
@@ -49,7 +47,7 @@ function handleApplicationCommand(data: any) {
     return jsonResponse({
       type: 4,
       data: {
-        content: '🗒️ **Action Item Creator**\\nClick "Add Action Item" to add items, or "Finish List" when done.',
+        content: '🗒️ **Action Item Creator**\nClick "Add Action Item" to add items, or "Finish List" when done.\n\n`items:[]`',
         components: [{
           type: 1,
           components: [
@@ -76,8 +74,8 @@ function handleApplicationCommand(data: any) {
   return jsonResponse({ error: 'Unknown command' }, 400)
 }
 
-function handleButtonClick(data: any) {
-  const customId = data.custom_id
+function handleButtonClick(interaction: any) {
+  const customId = interaction.data.custom_id
   
   if (customId === 'add_item') {
     return jsonResponse({
@@ -102,8 +100,11 @@ function handleButtonClick(data: any) {
   }
   
   if (customId === 'finish_list') {
-    const userId = data.member?.user?.id || data.user?.id
-    const items = userActionItems.get(userId) || []
+    // Extract items from message content
+    const messageContent = interaction.message?.content || ''
+    console.log('Finish list - message content:', messageContent)
+    const items = extractItemsFromMessage(messageContent)
+    console.log('Extracted items:', items)
     
     if (items.length === 0) {
       return jsonResponse({
@@ -115,13 +116,12 @@ function handleButtonClick(data: any) {
       })
     }
     
-    const itemsList = items.map((item: string, index: number) => `${index + 1}. ${item}`).join('\\n')
-    userActionItems.delete(userId)
+    const itemsList = items.map((item: string, index: number) => `${index + 1}. ${item}`).join('\n')
     
     return jsonResponse({
       type: 7,
       data: {
-        content: `📋 **Meeting Action Items** (${items.length} total)\\n\\n${itemsList}\\n\\n✅ All done! Use \`/create_action_items\` to create a new list.`,
+        content: `📋 **Meeting Action Items** (${items.length} total)\n\n${itemsList}\n\n✅ All done! Use \`/create_action_items\` to create a new list.`,
         components: []
       }
     })
@@ -130,22 +130,30 @@ function handleButtonClick(data: any) {
   return jsonResponse({ error: 'Unknown button' }, 400)
 }
 
-function handleModalSubmit(data: any) {
-  if (data.custom_id === 'action_item_modal') {
-    const userId = data.member?.user?.id || data.user?.id
-    const actionItem = data.components[0].components[0].value
+function handleModalSubmit(interaction: any) {
+  if (interaction.data.custom_id === 'action_item_modal') {
+    const actionItem = interaction.data.components[0].components[0].value
+    console.log('Modal submit - action item:', actionItem)
     
-    if (!userActionItems.has(userId)) {
-      userActionItems.set(userId, [])
-    }
+    // For modal submissions, we need to get the original message differently
+    // Let's use a simpler approach - store items in the custom_id as base64
+    const messageContent = interaction.message?.content || ''
+    console.log('Modal submit - message content:', messageContent)
     
-    userActionItems.get(userId).push(actionItem)
-    const currentCount = userActionItems.get(userId).length
+    const existingItems = extractItemsFromMessage(messageContent)
+    console.log('Modal submit - existing items:', existingItems)
+    
+    // Add new item
+    existingItems.push(actionItem)
+    const currentCount = existingItems.length
+    
+    // Create updated message with hidden items list
+    const updatedContent = `✅ Added item #${currentCount}: "${actionItem}"\n\n🗒️ **Action Item Creator** (${currentCount} items)\nAdd another item or finish your list.\n\n\`items:${JSON.stringify(existingItems)}\``
     
     return jsonResponse({
       type: 7,
       data: {
-        content: `✅ Added item #${currentCount}: "${actionItem}"\\n\\n🗒️ **Action Item Creator** (${currentCount} items)\\nAdd another item or finish your list.`,
+        content: updatedContent,
         components: [{
           type: 1,
           components: [
@@ -170,6 +178,21 @@ function handleModalSubmit(data: any) {
   }
   
   return jsonResponse({ error: 'Unknown modal' }, 400)
+}
+
+function extractItemsFromMessage(content: string): string[] {
+  try {
+    // Look for the items JSON in the message
+    const match = content.match(/`items:(\[.*?\])`/s)
+    if (match && match[1]) {
+      console.log('Found items match:', match[1])
+      return JSON.parse(match[1])
+    }
+    console.log('No items found in content:', content)
+  } catch (error) {
+    console.log('Error parsing items:', error)
+  }
+  return []
 }
 
 async function verifySignature(req: Request) {
