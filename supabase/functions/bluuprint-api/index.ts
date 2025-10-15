@@ -32,7 +32,7 @@ serve(async (req: Request) => {
   }
 
   if (type === 3) {
-    return handleButtonClick(interaction)
+    return handleComponentInteraction(interaction)
   }
 
   if (type === 5) {
@@ -47,26 +47,8 @@ function handleApplicationCommand(data: any) {
     return jsonResponse({
       type: 4,
       data: {
-        content: '🗒️ **Action Item Creator**\nClick "Add Action Item" to add items, or "Finish List" when done.\n\n`items:[]`',
-        components: [{
-          type: 1,
-          components: [
-            {
-              type: 2,
-              style: 1,
-              label: 'Add Action Item',
-              emoji: { name: '➕' },
-              custom_id: 'add_item'
-            },
-            {
-              type: 2,
-              style: 3,
-              label: 'Finish List',
-              emoji: { name: '✅' },
-              custom_id: 'finish_list'
-            }
-          ]
-        }]
+        content: renderBuilder(serializeState({ items: [] })),
+        components: buildComponents({ items: [] })
       }
     })
   }
@@ -74,9 +56,12 @@ function handleApplicationCommand(data: any) {
   return jsonResponse({ error: 'Unknown command' }, 400)
 }
 
-function handleButtonClick(interaction: any) {
+function handleComponentInteraction(interaction: any) {
   const customId = interaction.data.custom_id
-  
+  const messageContent = interaction.message?.content || ''
+  const state = parseState(messageContent)
+
+  // Button: Add item -> open modal
   if (customId === 'add_item') {
     return jsonResponse({
       type: 9,
@@ -98,15 +83,10 @@ function handleButtonClick(interaction: any) {
       }
     })
   }
-  
+
+  // Button: Finish -> render final with mentions
   if (customId === 'finish_list') {
-    // Extract items from message content
-    const messageContent = interaction.message?.content || ''
-    console.log('Finish list - message content:', messageContent)
-    const items = extractItemsFromMessage(messageContent)
-    console.log('Extracted items:', items)
-    
-    if (items.length === 0) {
+    if (state.items.length === 0) {
       return jsonResponse({
         type: 7,
         data: {
@@ -115,19 +95,82 @@ function handleButtonClick(interaction: any) {
         }
       })
     }
-    
-    const itemsList = items.map((item: string, index: number) => `${index + 1}. ${item}`).join('\n')
-    
+
+    const { content, allowed_mentions } = renderFinal(state)
     return jsonResponse({
       type: 7,
       data: {
-        content: `📋 **Meeting Action Items** (${items.length} total)\n\n${itemsList}\n\n✅ All done! Use \`/create_action_items\` to create a new list.`,
-        components: []
+        content,
+        components: [],
+        allowed_mentions
       }
     })
   }
-  
-  return jsonResponse({ error: 'Unknown button' }, 400)
+
+  // Role select (draft): set roles for pending draft
+  if (customId === 'select_roles_draft') {
+    const values: string[] = interaction.data.values || []
+    if (!state.draft) {
+      return jsonResponse({
+        type: 7,
+        data: {
+          content: renderBuilder(serializeState(state), 'No draft in progress. Click Add Action Item.'),
+          components: buildComponents(state),
+          allowed_mentions: { parse: [] }
+        }
+      })
+    }
+    state.draft.r = values
+    return jsonResponse({
+      type: 7,
+      data: {
+        content: renderBuilder(serializeState(state), `Selected ${values.length} role(s) for draft`),
+        components: buildComponents(state, { showDraftControls: true }),
+        allowed_mentions: { parse: [] }
+      }
+    })
+  }
+
+  // Confirm add: push draft to items
+  if (customId === 'confirm_add') {
+    if (!state.draft) {
+      return jsonResponse({
+        type: 7,
+        data: {
+          content: renderBuilder(serializeState(state), 'Nothing to confirm.'),
+          components: buildComponents(state),
+          allowed_mentions: { parse: [] }
+        }
+      })
+    }
+    const added = state.draft
+    state.items.push(added)
+    delete state.draft
+    const saved = serializeState(state)
+    return jsonResponse({
+      type: 7,
+      data: {
+        content: renderBuilder(saved, `✅ Added: "${added.t}"`),
+        components: buildComponents(state),
+        allowed_mentions: { parse: [] }
+      }
+    })
+  }
+
+  // Cancel add: discard draft
+  if (customId === 'cancel_add') {
+    if (state.draft) delete state.draft
+    return jsonResponse({
+      type: 7,
+      data: {
+        content: renderBuilder(serializeState(state), 'Canceled draft.'),
+        components: buildComponents(state),
+        allowed_mentions: { parse: [] }
+      }
+    })
+  }
+
+  return jsonResponse({ error: 'Unknown component' }, 400)
 }
 
 function handleModalSubmit(interaction: any) {
@@ -135,44 +178,17 @@ function handleModalSubmit(interaction: any) {
     const actionItem = interaction.data.components[0].components[0].value
     console.log('Modal submit - action item:', actionItem)
     
-    // For modal submissions, we need to get the original message differently
-    // Let's use a simpler approach - store items in the custom_id as base64
     const messageContent = interaction.message?.content || ''
     console.log('Modal submit - message content:', messageContent)
-    
-    const existingItems = extractItemsFromMessage(messageContent)
-    console.log('Modal submit - existing items:', existingItems)
-    
-    // Add new item
-    existingItems.push(actionItem)
-    const currentCount = existingItems.length
-    
-    // Create updated message with hidden items list
-    const updatedContent = `✅ Added item #${currentCount}: "${actionItem}"\n\n🗒️ **Action Item Creator** (${currentCount} items)\nAdd another item or finish your list.\n\n\`items:${JSON.stringify(existingItems)}\``
-    
+    const state = parseState(messageContent)
+    state.draft = { t: actionItem, r: [] }
+
     return jsonResponse({
       type: 7,
       data: {
-        content: updatedContent,
-        components: [{
-          type: 1,
-          components: [
-            {
-              type: 2,
-              style: 1,
-              label: 'Add Another Item',
-              emoji: { name: '➕' },
-              custom_id: 'add_item'
-            },
-            {
-              type: 2,
-              style: 3,
-              label: 'Finish List',
-              emoji: { name: '✅' },
-              custom_id: 'finish_list'
-            }
-          ]
-        }]
+        content: renderBuilder(serializeState(state), 'Select roles for this item, then Confirm or Cancel.'),
+        components: buildComponents(state, { showDraftControls: true }),
+        allowed_mentions: { parse: [] }
       }
     })
   }
@@ -180,19 +196,121 @@ function handleModalSubmit(interaction: any) {
   return jsonResponse({ error: 'Unknown modal' }, 400)
 }
 
-function extractItemsFromMessage(content: string): string[] {
+// ----- State helpers -----
+type ItemState = { t: string; r: string[] }
+type BuilderState = { items: ItemState[]; sel?: number; draft?: ItemState }
+
+function parseState(content: string): BuilderState {
   try {
-    // Look for the items JSON in the message
-    const match = content.match(/`items:(\[.*?\])`/s)
-    if (match && match[1]) {
-      console.log('Found items match:', match[1])
-      return JSON.parse(match[1])
+    // Prefer new structured state
+    const stateMatch = content.match(/`state:(\{.*?\})`/s)
+    if (stateMatch && stateMatch[1]) {
+      const parsed = JSON.parse(stateMatch[1])
+      // Basic shape validation
+      if (parsed && Array.isArray(parsed.items)) {
+        return { items: parsed.items.map((it: any) => ({ t: String(it.t), r: Array.isArray(it.r) ? it.r.map(String) : [] })), sel: typeof parsed.sel === 'number' ? parsed.sel : undefined }
+      }
     }
-    console.log('No items found in content:', content)
-  } catch (error) {
-    console.log('Error parsing items:', error)
+    // Back-compat: older `items:[...]` list of strings
+    const itemsMatch = content.match(/`items:(\[.*?\])`/s)
+    if (itemsMatch && itemsMatch[1]) {
+      const arr = JSON.parse(itemsMatch[1])
+      if (Array.isArray(arr)) {
+        return { items: arr.map((t: any) => ({ t: String(t), r: [] })) }
+      }
+    }
+  } catch (e) {
+    console.log('parseState error:', e)
   }
-  return []
+  return { items: [] }
+}
+
+function serializeState(state: BuilderState): string {
+  // Keep it compact
+  return `state:${JSON.stringify({ items: state.items, sel: state.sel, draft: state.draft })}`
+}
+
+function renderBuilder(stateToken: string, notice?: string): string {
+  // Build a summary line with counts and role markers without pinging
+  const state = parseState(stateToken)
+  const count = state.items.length
+  const lines = [
+    notice ? `${notice}` : undefined,
+    `🗒️ **Action Item Creator** (${count} ${count === 1 ? 'item' : 'items'})`,
+    'Add items, optionally assign roles, then finish your list.',
+    '',
+  ].filter(Boolean) as string[]
+  if (count > 0) {
+    lines.push(
+      ...state.items.map((it, i) => `• ${i + 1}. ${it.t}${it.r.length ? ` (roles: ${it.r.length})` : ''}`)
+    )
+    lines.push('')
+  }
+  if (state.draft) {
+    lines.push(`Draft: ${state.draft.t}${state.draft.r.length ? ` (roles: ${state.draft.r.length})` : ''}`)
+    lines.push('')
+  }
+  lines.push('`' + stateToken + '`')
+  return lines.join('\n')
+}
+
+function buildComponents(state: BuilderState, opts?: { showItemSelect?: boolean; showRoleSelect?: boolean; showDraftControls?: boolean }) {
+  const rows: any[] = []
+  // Row 1: primary buttons
+  rows.push({
+    type: 1,
+    components: [
+      { type: 2, style: 1, label: 'Add Action Item', emoji: { name: '➕' }, custom_id: 'add_item' },
+      { type: 2, style: 3, label: 'Finish List', emoji: { name: '✅' }, custom_id: 'finish_list', disabled: state.items.length === 0 }
+    ]
+  })
+
+  if (opts?.showDraftControls && state.draft) {
+    rows.push({
+      type: 1,
+      components: [
+        {
+          type: 6, // role select
+          custom_id: 'select_roles_draft',
+          placeholder: 'Pick roles to notify (optional)',
+          min_values: 0,
+          max_values: 25,
+          default_values: (state.draft.r || []).map((rid) => ({ id: rid, type: 1 }))
+        }
+      ]
+    })
+    rows.push({
+      type: 1,
+      components: [
+        { type: 2, style: 3, label: 'Confirm', emoji: { name: '✅' }, custom_id: 'confirm_add' },
+        { type: 2, style: 2, label: 'Cancel', emoji: { name: '🛑' }, custom_id: 'cancel_add' }
+      ]
+    })
+  }
+
+  return rows
+}
+
+function trimLabel(s: string, max = 100) {
+  const clean = s.replace(/\n/g, ' ').trim()
+  return clean.length <= max ? clean : clean.slice(0, max - 1) + '…'
+}
+
+function renderFinal(state: BuilderState): { content: string; allowed_mentions: any } {
+  const lines: string[] = []
+  const roleSet = new Set<string>()
+  lines.push(`📋 **Meeting Action Items** (${state.items.length} total)`, '')
+  state.items.forEach((it, i) => {
+    const roleMentions = it.r.map((rid) => `<@&${rid}>`)
+    roleMentions.forEach((rid) => roleSet.add(rid.slice(3, -1)))
+    const suffix = roleMentions.length ? ` — notify: ${roleMentions.join(' ')}` : ''
+    lines.push(`${i + 1}. ${it.t}${suffix}`)
+  })
+  lines.push('', '✅ All done! Use `/create_action_items` to create a new list.')
+  return {
+    content: lines.join('\n'),
+    allowed_mentions: { roles: Array.from(roleSet) }
+  }
 }
 
 async function verifySignature(req: Request) {
