@@ -47,8 +47,8 @@ function handleApplicationCommand(data: any) {
     return jsonResponse({
       type: 4,
       data: {
-        content: renderBuilder(serializeState({ items: [] })),
-        components: buildComponents({ items: [] })
+        content: renderBuilder(serializeState({ items: [], selRoles: [], awaiting: false })),
+        components: buildComponents({ items: [], selRoles: [], awaiting: false })
       }
     })
   }
@@ -56,30 +56,26 @@ function handleApplicationCommand(data: any) {
   return jsonResponse({ error: 'Unknown command' }, 400)
 }
 
-function handleComponentInteraction(interaction: any) {
+async function handleComponentInteraction(interaction: any) {
   const customId = interaction.data.custom_id
   const messageContent = interaction.message?.content || ''
   const state = parseState(messageContent)
+  // Persist builder message id when available
+  if (!state.builderId && interaction.message?.id) {
+    ;(state as any).builderId = String(interaction.message.id)
+  }
+  const channelId = interaction.channel_id
+  const userId = interaction.member?.user?.id || interaction.user?.id
 
   // Button: Add item -> open modal
   if (customId === 'add_item') {
+    state.awaiting = true
     return jsonResponse({
-      type: 9,
+      type: 7,
       data: {
-        title: 'Add Action Item',
-        custom_id: 'action_item_modal',
-        components: [{
-          type: 1,
-          components: [{
-            type: 4,
-            custom_id: 'action_item_text',
-            label: 'What needs to be done?',
-            style: 2,
-            placeholder: 'e.g., Follow up with client by Friday',
-            required: true,
-            max_length: 500
-          }]
-        }]
+        content: renderBuilder(serializeState(state), '📝 Type your next action item in chat, then press "Save Last Message".'),
+        components: buildComponents(state),
+        allowed_mentions: { parse: [] }
       }
     })
   }
@@ -107,63 +103,89 @@ function handleComponentInteraction(interaction: any) {
     })
   }
 
-  // Role select (draft): set roles for pending draft
-  if (customId === 'select_roles_draft') {
-    const values: string[] = interaction.data.values || []
-    if (!state.draft) {
+  // Save last message from user (inline-like capture)
+  if (customId === 'save_last_message') {
+    // @ts-ignore - Deno global available at runtime
+    const botToken = (Deno.env.get('DISCORD_BOT_TOKEN') || '').trim()
+    if (!botToken) {
       return jsonResponse({
         type: 7,
         data: {
-          content: renderBuilder(serializeState(state), 'No draft in progress. Click Add Action Item.'),
+          content: renderBuilder(serializeState(state), '⚠️ Unable to save: Bot token not configured. Please set DISCORD_BOT_TOKEN in Supabase env or use the modal flow.'),
           components: buildComponents(state),
           allowed_mentions: { parse: [] }
         }
       })
     }
-    state.draft.r = values
-    return jsonResponse({
-      type: 7,
-      data: {
-        content: renderBuilder(serializeState(state), `Selected ${values.length} role(s) for draft`),
-        components: buildComponents(state, { showDraftControls: true }),
-        allowed_mentions: { parse: [] }
+    try {
+      const last = await fetchLastUserMessage(channelId, userId, (state as any).builderId, botToken)
+      if (!last) {
+        return jsonResponse({
+          type: 7,
+          data: {
+            content: renderBuilder(serializeState(state), '⚠️ Couldn\'t find a recent message from you. Please type it in this channel and press "Save Last Message" again.'),
+            components: buildComponents(state),
+            allowed_mentions: { parse: [] }
+          }
+        })
       }
-    })
+      const desc = last.content.trim()
+      const roles = Array.isArray((state as any).selRoles) ? (state as any).selRoles : []
+      state.items.push({ t: desc, r: roles })
+
+      // Post a confirmation message that pings roles
+      if (roles.length) {
+        const mentions = roles.map((id: string) => `<@&${id}>`).join(' ')
+        await discordCreateMessage(channelId, `✅ Added: ${desc} — notify: ${mentions}`,
+          { roles }, botToken)
+      } else {
+        await discordCreateMessage(channelId, `✅ Added: ${desc}`, undefined, botToken)
+      }
+
+      // Keep awaiting true to allow immediate next input
+      const saved = serializeState(state)
+      return jsonResponse({
+        type: 7,
+        data: {
+          content: renderBuilder(saved, `✅ Added: "${trimLabel(desc, 100)}"${roles.length ? ` (roles: ${roles.length})` : ''}\n📝 Type next item, then press "Save Last Message".`),
+          components: buildComponents(state),
+          allowed_mentions: { parse: [] }
+        }
+      })
+    } catch (e) {
+      console.log('save_last_message error:', e)
+      return jsonResponse({
+        type: 7,
+        data: {
+          content: renderBuilder(serializeState(state), '❌ Error saving last message. Please try again.'),
+          components: buildComponents(state),
+          allowed_mentions: { parse: [] }
+        }
+      })
+    }
   }
 
-  // Confirm add: push draft to items
-  if (customId === 'confirm_add') {
-    if (!state.draft) {
-      return jsonResponse({
-        type: 7,
-        data: {
-          content: renderBuilder(serializeState(state), 'Nothing to confirm.'),
-          components: buildComponents(state),
-          allowed_mentions: { parse: [] }
-        }
-      })
-    }
-    const added = state.draft
-    state.items.push(added)
-    delete state.draft
-    const saved = serializeState(state)
+  if (customId === 'cancel_capture') {
+    state.awaiting = false
     return jsonResponse({
       type: 7,
       data: {
-        content: renderBuilder(saved, `✅ Added: "${added.t}"`),
+        content: renderBuilder(serializeState(state), '✋ Stopped capturing. Click Add Action Item to start again.'),
         components: buildComponents(state),
         allowed_mentions: { parse: [] }
       }
     })
   }
 
-  // Cancel add: discard draft
-  if (customId === 'cancel_add') {
-    if (state.draft) delete state.draft
+  // Role select for next item (handle legacy/different ids defensively)
+  if (customId === 'select_roles_current' || customId === 'select_roles_draft') {
+    const values: string[] = interaction.data?.values || []
+    console.log('Role select values:', values)
+    state.selRoles = Array.isArray(values) ? values : []
     return jsonResponse({
       type: 7,
       data: {
-        content: renderBuilder(serializeState(state), 'Canceled draft.'),
+        content: renderBuilder(serializeState(state), `Selected ${state.selRoles.length} role(s) for next item`),
         components: buildComponents(state),
         allowed_mentions: { parse: [] }
       }
@@ -177,17 +199,18 @@ function handleModalSubmit(interaction: any) {
   if (interaction.data.custom_id === 'action_item_modal') {
     const actionItem = interaction.data.components[0].components[0].value
     console.log('Modal submit - action item:', actionItem)
-    
+
     const messageContent = interaction.message?.content || ''
     console.log('Modal submit - message content:', messageContent)
     const state = parseState(messageContent)
-    state.draft = { t: actionItem, r: [] }
-
+    const roles = Array.isArray((state as any).selRoles) ? (state as any).selRoles : []
+    state.items.push({ t: actionItem, r: roles })
+    const saved = serializeState(state)
     return jsonResponse({
       type: 7,
       data: {
-        content: renderBuilder(serializeState(state), 'Select roles for this item, then Confirm or Cancel.'),
-        components: buildComponents(state, { showDraftControls: true }),
+        content: renderBuilder(saved, `✅ Added: "${actionItem}"${roles.length ? ` (roles: ${roles.length})` : ''}`),
+        components: buildComponents(state),
         allowed_mentions: { parse: [] }
       }
     })
@@ -198,7 +221,7 @@ function handleModalSubmit(interaction: any) {
 
 // ----- State helpers -----
 type ItemState = { t: string; r: string[] }
-type BuilderState = { items: ItemState[]; sel?: number; draft?: ItemState }
+type BuilderState = { items: ItemState[]; sel?: number; selRoles?: string[]; awaiting?: boolean; builderId?: string }
 
 function parseState(content: string): BuilderState {
   try {
@@ -208,7 +231,13 @@ function parseState(content: string): BuilderState {
       const parsed = JSON.parse(stateMatch[1])
       // Basic shape validation
       if (parsed && Array.isArray(parsed.items)) {
-        return { items: parsed.items.map((it: any) => ({ t: String(it.t), r: Array.isArray(it.r) ? it.r.map(String) : [] })), sel: typeof parsed.sel === 'number' ? parsed.sel : undefined }
+        return {
+          items: parsed.items.map((it: any) => ({ t: String(it.t), r: Array.isArray(it.r) ? it.r.map(String) : [] })),
+          sel: typeof parsed.sel === 'number' ? parsed.sel : undefined,
+          selRoles: Array.isArray(parsed.selRoles) ? parsed.selRoles.map(String) : [],
+          awaiting: typeof parsed.awaiting === 'boolean' ? parsed.awaiting : false,
+          builderId: parsed.builderId ? String(parsed.builderId) : undefined
+        }
       }
     }
     // Back-compat: older `items:[...]` list of strings
@@ -227,7 +256,7 @@ function parseState(content: string): BuilderState {
 
 function serializeState(state: BuilderState): string {
   // Keep it compact
-  return `state:${JSON.stringify({ items: state.items, sel: state.sel, draft: state.draft })}`
+  return `state:${JSON.stringify({ items: state.items, sel: state.sel, selRoles: state.selRoles, awaiting: state.awaiting, builderId: state.builderId })}`
 }
 
 function renderBuilder(stateToken: string, notice?: string): string {
@@ -237,7 +266,7 @@ function renderBuilder(stateToken: string, notice?: string): string {
   const lines = [
     notice ? `${notice}` : undefined,
     `🗒️ **Action Item Creator** (${count} ${count === 1 ? 'item' : 'items'})`,
-    'Add items, optionally assign roles, then finish your list.',
+    state.awaiting ? 'Type your next action item in chat, then press "Save Last Message".' : 'Pick roles for the next item, then add a description.',
     '',
   ].filter(Boolean) as string[]
   if (count > 0) {
@@ -246,47 +275,38 @@ function renderBuilder(stateToken: string, notice?: string): string {
     )
     lines.push('')
   }
-  if (state.draft) {
-    lines.push(`Draft: ${state.draft.t}${state.draft.r.length ? ` (roles: ${state.draft.r.length})` : ''}`)
-    lines.push('')
-  }
+  const selCount = (state.selRoles || []).length
+  lines.push(`Next item roles: ${selCount} selected`)
+  lines.push('')
   lines.push('`' + stateToken + '`')
   return lines.join('\n')
 }
 
-function buildComponents(state: BuilderState, opts?: { showItemSelect?: boolean; showRoleSelect?: boolean; showDraftControls?: boolean }) {
+function buildComponents(state: BuilderState, _opts?: any) {
   const rows: any[] = []
-  // Row 1: primary buttons
+  // Row 1: role select for next item
   rows.push({
     type: 1,
     components: [
-      { type: 2, style: 1, label: 'Add Action Item', emoji: { name: '➕' }, custom_id: 'add_item' },
-      { type: 2, style: 3, label: 'Finish List', emoji: { name: '✅' }, custom_id: 'finish_list', disabled: state.items.length === 0 }
+      {
+        type: 6,
+        custom_id: 'select_roles_current',
+        placeholder: 'Pick roles for next item (optional)',
+        min_values: 0,
+        max_values: 25
+      }
     ]
   })
-
-  if (opts?.showDraftControls && state.draft) {
-    rows.push({
-      type: 1,
-      components: [
-        {
-          type: 6, // role select
-          custom_id: 'select_roles_draft',
-          placeholder: 'Pick roles to notify (optional)',
-          min_values: 0,
-          max_values: 25,
-          default_values: (state.draft.r || []).map((rid) => ({ id: rid, type: 1 }))
-        }
-      ]
-    })
-    rows.push({
-      type: 1,
-      components: [
-        { type: 2, style: 3, label: 'Confirm', emoji: { name: '✅' }, custom_id: 'confirm_add' },
-        { type: 2, style: 2, label: 'Cancel', emoji: { name: '🛑' }, custom_id: 'cancel_add' }
-      ]
-    })
+  // Row 2: primary buttons
+  const buttons: any[] = []
+  if (state.awaiting) {
+    buttons.push({ type: 2, style: 1, label: 'Save Last Message', emoji: { name: '💾' }, custom_id: 'save_last_message' })
+    buttons.push({ type: 2, style: 4, label: 'Cancel', emoji: { name: '✋' }, custom_id: 'cancel_capture' })
+  } else {
+    buttons.push({ type: 2, style: 1, label: 'Add Action Item', emoji: { name: '➕' }, custom_id: 'add_item' })
   }
+  buttons.push({ type: 2, style: 3, label: 'Finish List', emoji: { name: '✅' }, custom_id: 'finish_list', disabled: state.items.length === 0 })
+  rows.push({ type: 1, components: buttons })
 
   return rows
 }
@@ -338,4 +358,39 @@ function jsonResponse(data: any, status = 200) {
     status,
     headers: { 'Content-Type': 'application/json' }
   })
+}
+
+// ------- Discord REST helpers (for inline-like capture) -------
+async function fetchLastUserMessage(channelId: string, userId: string, excludeMessageId: string | undefined, botToken: string) {
+  const url = `https://discord.com/api/v10/channels/${channelId}/messages?limit=25`
+  const res = await fetch(url, { headers: discordAuthHeaders(botToken) })
+  if (!res.ok) {
+    console.log('fetch messages failed', res.status, await safeText(res))
+    return null
+  }
+  const messages: any[] = await res.json()
+  const match = messages.find((m) => m?.author?.id === userId && typeof m?.content === 'string' && m.content.trim() && !m.content.startsWith('/') && m.id !== excludeMessageId)
+  return match || null
+}
+
+async function discordCreateMessage(channelId: string, content: string, allowed: { roles: string[] } | undefined, botToken: string) {
+  const url = `https://discord.com/api/v10/channels/${channelId}/messages`
+  const body: any = { content }
+  if (allowed) body.allowed_mentions = { roles: allowed.roles }
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { ...discordAuthHeaders(botToken), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  if (!res.ok) {
+    console.log('create message failed', res.status, await safeText(res))
+  }
+}
+
+function discordAuthHeaders(botToken: string) {
+  return { Authorization: `Bot ${botToken}` }
+}
+
+async function safeText(res: Response) {
+  try { return await res.text() } catch { return '' }
 }
